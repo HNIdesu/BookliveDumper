@@ -22,32 +22,52 @@ pid=frida.spawn(filepath)
 session=frida.attach(pid)
 script=session.create_script("""
 const module=Module.load("WasabiDLL.dll")
-let url=""
-function send_data(url,address,length){
-    let bytesRead=0
-    let index=0
-    let chunkCount=Math.ceil(length/65536)
-    while(bytesRead<length){
-        const toRead=Math.min(65536,length-bytesRead)
-        const chunk=address.add(bytesRead).readByteArray(toRead)
-        send({url:url,chunkIndex:index++,chunkCount:chunkCount},chunk)
-        bytesRead+=toRead
-    }
-}
-Interceptor.attach(module.findExportByName("WSB_MediaStream_OpenUrl"),{
-    onEnter:function(args){
-        url=args[0].readCString()
-    }
-})
-Interceptor.attach(module.findExportByName("WSB_MediaStream_Read"),{
-    onEnter:function(args){
-        this.obj=this.context.ecx
-        this.out=args[1]
-        this.length=args[2].readU32()
-    },onLeave:function(){
-        send_data(url,this.out,this.length)
-    }
-})
+	const WSB_MediaStream_GetSize=new NativeFunction(module.findExportByName("WSB_MediaStream_GetSize"),'pointer',['pointer','pointer'])
+	const WSB_MediaStream_Seek=new NativeFunction(module.findExportByName("WSB_MediaStream_Seek"),'pointer',['pointer','int32','int32'])
+	let url=null
+	let do_dump=false
+	function send_data(url,address,length){
+		let bytesRead=0
+		let index=0
+		let chunkCount=Math.ceil(length/65536)
+		while(bytesRead<length){
+			const toRead=Math.min(65536,length-bytesRead)
+			const chunk=address.add(bytesRead).readByteArray(toRead)
+			send({url:url,chunkIndex:index++,chunkCount:chunkCount},chunk)
+			bytesRead+=toRead
+		}
+	}
+	Interceptor.attach(module.findExportByName("WSB_MediaStream_OpenUrl"),{
+		onEnter:function(args){
+			const url1=args[0].readCString()
+			if(url1!=url){
+				url=url1
+				do_dump=true
+			}else{
+				do_dump=false//Avoid dumping the same file
+			}
+		}
+	})
+	Interceptor.attach(module.findExportByName("WSB_MediaStream_Read"),{
+		onEnter:function(args){
+			if(do_dump){
+				const obj=args[0]
+				WSB_MediaStream_Seek(obj,0,0)
+				const ptr=Memory.alloc(4);
+				WSB_MediaStream_GetSize(obj,ptr)
+				this.length=ptr.readU32()
+				this.out=Memory.alloc(this.length)
+				args[1]=this.out
+				args[2].writeU32(this.length)
+			}
+		},onLeave:function(){
+			if(do_dump){
+				send_data(url,this.out,this.length)
+				do_dump=false
+			}
+			
+		}
+	})
 """)
 
 class CustomList[T]:
@@ -92,4 +112,4 @@ while(True):
     with open(savepath,"wb") as bw:
         for chunk in chunk_list:
             bw.write(chunk)
-    print(f"dump file {savepath}")
+    print(f"dump file {Path.abspath(savepath)}")
